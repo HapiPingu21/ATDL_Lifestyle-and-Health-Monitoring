@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifestyle and Health Monitoring Prototype</title>
+<style>
+  body { margin: 3rem auto; padding: 0 1.25rem; max-width: 42rem; font: 1rem/1.5 system-ui, sans-serif; background: #f4f7f3; color: #183b32; }
+  h1 { line-height: 1.12; }
+  form { display: grid; gap: .9rem; margin: 1.5rem 0; }
+  input, select, button { font: inherit; padding: .45rem; }
+  label { display: grid; gap: .25rem; }
+  button { cursor: pointer; }
+  dl { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+  dd { margin: 0; font-weight: bold; }
+  #photo-preview { max-width: 100%; max-height: 18rem; object-fit: contain; }
+  #photo-suggestions button { margin: .15rem; }
+</style>
+<main>
+  <h1>Lifestyle and Health Monitoring</h1>
+  <p>Local prototype for synthetic data. Use sample numbers for meals and activity.</p>
+  <form id="capture">
+    <label>Date for new records and daily totals <input id="day" type="date" required></label>
+    <label>Record type
+      <select id="kind">
+        <option value="meal">Meal energy (kcal)</option>
+        <option value="steps">Step count for an activity interval</option>
+      </select>
+    </label>
+    <label>Amount <input id="amount" type="number" min="0" max="100000" step="1" required></label>
+    <button type="submit">Save sample record</button>
+  </form>
+  <button type="button" id="retry">Sync pending records</button>
+  <p id="status" role="status"></p>
+  <h2>Daily totals</h2>
+  <dl>
+    <dt>Meal energy</dt><dd id="meal">—</dd>
+    <dt>Steps</dt><dd id="steps">—</dd>
+  </dl>
+  <h2>Saved meals</h2>
+  <p id="meals-status" role="status"></p>
+  <ul id="saved-meals"></ul>
+  <section aria-labelledby="photo-title">
+    <h2 id="photo-title">Log a meal from a photo</h2>
+    <p>The local model suggests a dish. Check the name and enter the portion and energy from a label or recipe.</p>
+    <form id="photo-meal">
+      <label>Food photo (JPEG, PNG or WebP, up to 8 MiB)
+        <input id="photo" type="file" accept="image/jpeg,image/png,image/webp">
+      </label>
+      <img id="photo-preview" alt="Selected food photo" hidden>
+      <button type="button" id="analyze-photo" disabled>Analyze photo locally</button>
+      <p id="photo-status" role="status"></p>
+      <div id="photo-suggestions" aria-label="Food suggestions"></div>
+      <label>Confirmed food name <input id="food" maxlength="100" required></label>
+      <label>Portion (g) <input id="grams" type="number" min="1" max="10000" step="1" required></label>
+      <label>Energy per 100 g (kcal) <input id="density" type="number" min="0" max="1000" step="1" required></label>
+      <output id="photo-energy">Estimated meal energy: —</output>
+      <button type="submit" id="save-photo-meal">Confirm and save meal</button>
+    </form>
+  </section>
+</main>
+<script>
+  const form = document.querySelector('#capture');
+  const day = document.querySelector('#day');
+  const kind = document.querySelector('#kind');
+  const amount = document.querySelector('#amount');
+  const status = document.querySelector('#status');
+  const photoForm = document.querySelector('#photo-meal');
+  const photoInput = document.querySelector('#photo');
+  const preview = document.querySelector('#photo-preview');
+  const analyzeButton = document.querySelector('#analyze-photo');
+  const photoStatus = document.querySelector('#photo-status');
+  const suggestions = document.querySelector('#photo-suggestions');
+  const food = document.querySelector('#food');
+  const grams = document.querySelector('#grams');
+  const density = document.querySelector('#density');
+  const photoEnergy = document.querySelector('#photo-energy');
+  const savePhotoButton = document.querySelector('#save-photo-meal');
+  let previewUrl;
+  const queueKey = 'health-prototype.pending.v1';
+  let syncing = false;
+  const now = new Date();
+  day.value = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+    .toISOString().slice(0, 10);
+
+  function readQueue() {
+    return JSON.parse(localStorage.getItem(queueKey) ?? '[]');
+  }
+
+  async function refresh() {
+    const selectedDay = day.value;
+    const meal = document.querySelector('#meal');
+    const steps = document.querySelector('#steps');
+    const savedMeals = document.querySelector('#saved-meals');
+    const mealsStatus = document.querySelector('#meals-status');
+    savedMeals.replaceChildren();
+    mealsStatus.textContent = '';
+    meal.textContent = steps.textContent = '—';
+    if (!selectedDay) return;
+    try {
+      const response = await fetch('/api/v1/daily?day=' + encodeURIComponent(selectedDay));
+      if (!response.ok) throw new Error('Daily totals unavailable.');
+      const totals = await response.json();
+      if (day.value !== selectedDay) return;
+      meal.textContent = totals.meal_kcal == null ? 'No records' : totals.meal_kcal + ' kcal';
+      steps.textContent = totals.steps == null ? 'No records' : totals.steps;
+      mealsStatus.textContent = totals.meals.length ? '' : 'No meals saved for this date.';
+      for (const entry of totals.meals) {
+        const item = document.createElement('li');
+        item.textContent = entry.food
+          ? `${entry.food}, ${entry.grams} g · ${entry.kcal} kcal (${entry.kcal_per_100g} kcal per 100 g)`
+          : `Manual meal · ${entry.kcal} kcal`;
+        savedMeals.append(item);
+      }
+    } catch {
+      if (day.value === selectedDay) {
+        meal.textContent = steps.textContent = 'Server unavailable';
+        mealsStatus.textContent = 'Saved meals unavailable.';
+      }
+    }
+  }
+
+  async function sync() {
+    if (syncing) return;
+    syncing = true;
+    form.querySelector('button').disabled = true;
+    document.querySelector('#retry').disabled = true;
+    savePhotoButton.disabled = true;
+    try {
+      const records = readQueue();
+      for (const record of records) {
+        const response = await fetch('/api/v1/records', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(record),
+        });
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error ?? 'Server rejected a pending record.');
+        }
+        localStorage.setItem(queueKey, JSON.stringify(
+          readQueue().filter(pending => pending.id !== record.id)
+        ));
+      }
+      status.textContent = records.length ? 'Sample records synced.' : 'No pending records.';
+    } catch (error) {
+      status.textContent = 'Sync paused. Pending records stay in this browser. ' + error.message;
+    } finally {
+      syncing = false;
+      form.querySelector('button').disabled = false;
+      document.querySelector('#retry').disabled = false;
+      savePhotoButton.disabled = false;
+      await refresh();
+    }
+  }
+
+  function enqueue(entry, message = status) {
+    try {
+      const record = {id: crypto.randomUUID(), day: day.value, ...entry};
+      localStorage.setItem(queueKey, JSON.stringify([...readQueue(), record]));
+      return true;
+    } catch {
+      message.textContent = 'Could not save a pending record in this browser.';
+      return false;
+    }
+  }
+
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!enqueue({kind: kind.value, value: amount.valueAsNumber})) return;
+    amount.value = '';
+    void sync();
+  });
+  kind.addEventListener('change', () => {
+    amount.max = kind.value === 'meal' ? 100_000 : 1_000_000;
+  });
+  day.addEventListener('change', refresh);
+
+  function mealEnergy() {
+    return Math.round(grams.valueAsNumber * density.valueAsNumber / 100);
+  }
+
+  function showEnergy() {
+    const energy = mealEnergy();
+    photoEnergy.textContent = 'Estimated meal energy: ' +
+      (grams.validity.valid && density.validity.valid ? energy + ' kcal' : '—');
+  }
+
+  photoInput.addEventListener('change', () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    const file = photoInput.files[0];
+    const supported = file && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+      && file.size > 0 && file.size <= 8 * 1024 * 1024;
+    previewUrl = supported ? URL.createObjectURL(file) : undefined;
+    if (previewUrl) preview.src = previewUrl;
+    else preview.removeAttribute('src');
+    preview.hidden = !supported;
+    analyzeButton.disabled = !supported;
+    suggestions.replaceChildren();
+    food.value = grams.value = density.value = '';
+    photoStatus.textContent = file && !supported ? 'Choose a JPEG, PNG or WebP photo up to 8 MiB.' : '';
+    showEnergy();
+  });
+
+  analyzeButton.addEventListener('click', async () => {
+    const file = photoInput.files[0];
+    if (!file) return;
+    analyzeButton.disabled = true;
+    suggestions.replaceChildren();
+    photoStatus.textContent = 'Analyzing on the local server…';
+    try {
+      const response = await fetch('/api/v1/food-photo', {
+        method: 'POST', headers: {'Content-Type': file.type}, body: file,
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      if (photoInput.files[0] !== file) return;
+      for (const candidate of result.suggestions) {
+        const choice = document.createElement('button');
+        choice.type = 'button';
+        choice.textContent = candidate.food;
+        choice.addEventListener('click', () => { food.value = candidate.food; });
+        suggestions.append(choice);
+      }
+      photoStatus.textContent = 'Choose a suggestion or type the correct food name.';
+    } catch (error) {
+      if (photoInput.files[0] === file) {
+        photoStatus.textContent = 'Analysis unavailable. You can still enter the meal manually. ' + error.message;
+      }
+    } finally {
+      if (photoInput.files[0] === file) analyzeButton.disabled = false;
+    }
+  });
+  grams.addEventListener('input', showEnergy);
+  density.addEventListener('input', showEnergy);
+  photoForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!day.reportValidity()) return;
+    if (!food.value.trim()) {
+      photoStatus.textContent = 'Enter a food name.';
+      food.focus();
+      return;
+    }
+    const entry = {kind: 'meal', value: mealEnergy(), photo_meal: {
+      food: food.value.trim(), grams: grams.valueAsNumber, kcal_per_100g: density.valueAsNumber,
+    }};
+    if (!enqueue(entry, photoStatus)) return;
+    photoForm.reset();
+    photoInput.dispatchEvent(new Event('change'));
+    await sync();
+    photoStatus.textContent = status.textContent;
+  });
+  document.querySelector('#retry').addEventListener('click', sync);
+  window.addEventListener('online', sync);
+  void sync();
+</script>
+</html>
