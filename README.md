@@ -35,7 +35,7 @@ python food_photo.py
 python server.py
 ```
 
-On the dashboard, choose a JPEG, PNG or WebP image, then click **Analyze photo locally**. Select or correct a dish name. Enter the portion in grams and the energy per 100 g from the food label or recipe. Check the estimated energy, then confirm the meal. For example, 150 g at 240 kcal per 100 g gives 360 kcal.
+On the dashboard, choose a JPEG, PNG or WebP image. Analysis starts automatically. Click **Analyze photo locally** to retry if needed. Select or correct a dish name. Choose an example starting portion (150, 300 or 450 g), or enter a custom weight. The buttons are editable demo amounts. Energy shortcuts of 100, 160 and 240 kcal per 100 g are also provided as example values for testing. Enter the energy per 100 g from the food label or recipe. Check the estimated energy, then confirm the meal. For example, 150 g at 240 kcal per 100 g gives 360 kcal.
 
 The model suggests up to three whole-dish labels. Portion weight and energy density come from the user. If analysis fails or none of the labels fit, type the dish name manually. Inference runs on the local CPU without network access. Photo bytes are processed in memory. The database keeps the confirmed name, portion and energy values. Use a public sample photo or other non-sensitive demo input.
 

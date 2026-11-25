@@ -13,7 +13,9 @@
   dl { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
   dd { margin: 0; font-weight: bold; }
   #photo-preview { max-width: 100%; max-height: 18rem; object-fit: contain; }
-  #photo-suggestions button { margin: .15rem; }
+  #photo-suggestions { display: grid; gap: .5rem; }
+  #photo-suggestions button { text-align: left; border: 1px solid #087465; background: white; color: #183b32; }
+  #energy-presets button[aria-pressed="true"], #portion-presets button[aria-pressed="true"], #photo-suggestions button[aria-pressed="true"] { background: #d7eee2; font-weight: bold; }
 </style>
 <main>
   <h1>Lifestyle and Health Monitoring</h1>
@@ -49,10 +51,27 @@
       <img id="photo-preview" alt="Selected food photo" hidden>
       <button type="button" id="analyze-photo" disabled>Analyze photo locally</button>
       <p id="photo-status" role="status"></p>
-      <div id="photo-suggestions" aria-label="Food suggestions"></div>
+      <fieldset id="photo-results" hidden>
+        <legend>Suggested dishes</legend>
+        <div id="photo-suggestions" aria-label="Food suggestions"></div>
+      </fieldset>
       <label>Confirmed food name <input id="food" maxlength="100" required></label>
-      <label>Portion (g) <input id="grams" type="number" min="1" max="10000" step="1" required></label>
-      <label>Energy per 100 g (kcal) <input id="density" type="number" min="0" max="1000" step="1" required></label>
+      <fieldset id="portion-presets">
+        <legend>Choose a starting portion</legend>
+        <p id="portion-help">Example amounts for the demo. Adjust the grams to match your serving.</p>
+        <button type="button" data-grams="150" aria-pressed="false">Small · 150 g</button>
+        <button type="button" data-grams="300" aria-pressed="false">Medium · 300 g</button>
+        <button type="button" data-grams="450" aria-pressed="false">Large · 450 g</button>
+      </fieldset>
+      <label>Portion (g) <input id="grams" type="number" min="1" max="10000" step="1" aria-describedby="portion-help" required></label>
+      <fieldset id="energy-presets">
+        <legend>Choose an example energy value</legend>
+        <p id="energy-help">Demo values per 100 g. For a real meal, enter the value from its label or recipe.</p>
+        <button type="button" data-density="100" aria-pressed="false">100 kcal / 100 g</button>
+        <button type="button" data-density="160" aria-pressed="false">160 kcal / 100 g</button>
+        <button type="button" data-density="240" aria-pressed="false">240 kcal / 100 g</button>
+      </fieldset>
+      <label>Energy per 100 g (kcal) <input id="density" type="number" min="0" max="1000" step="1" aria-describedby="energy-help" required></label>
       <output id="photo-energy">Estimated meal energy: —</output>
       <button type="submit" id="save-photo-meal">Confirm and save meal</button>
     </form>
@@ -73,8 +92,12 @@
   const food = document.querySelector('#food');
   const grams = document.querySelector('#grams');
   const density = document.querySelector('#density');
+  const portionButtons = document.querySelectorAll('#portion-presets button');
+  const energyButtons = document.querySelectorAll('#energy-presets button');
   const photoEnergy = document.querySelector('#photo-energy');
   const savePhotoButton = document.querySelector('#save-photo-meal');
+  const photoResults = document.querySelector("#photo-results");
+  let photoRequest;
   let previewUrl;
   const queueKey = 'health-prototype.pending.v1';
   let syncing = false;
@@ -181,11 +204,19 @@
 
   function showEnergy() {
     const energy = mealEnergy();
+    for (const button of portionButtons) {
+      button.setAttribute('aria-pressed', String(grams.valueAsNumber === Number(button.dataset.grams)));
+    }
+    for (const button of energyButtons) {
+      button.setAttribute('aria-pressed', String(density.valueAsNumber === Number(button.dataset.density)));
+    }
     photoEnergy.textContent = 'Estimated meal energy: ' +
       (grams.validity.valid && density.validity.valid ? energy + ' kcal' : '—');
   }
 
   photoInput.addEventListener('change', () => {
+    if (photoRequest) photoRequest.abort();
+    photoRequest = undefined;
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     const file = photoInput.files[0];
     const supported = file && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
@@ -196,41 +227,79 @@
     preview.hidden = !supported;
     analyzeButton.disabled = !supported;
     suggestions.replaceChildren();
+    photoResults.hidden = true;
     food.value = grams.value = density.value = '';
     photoStatus.textContent = file && !supported ? 'Choose a JPEG, PNG or WebP photo up to 8 MiB.' : '';
     showEnergy();
+    if (supported) void analyzePhoto();
   });
 
-  analyzeButton.addEventListener('click', async () => {
+  async function analyzePhoto() {
     const file = photoInput.files[0];
     if (!file) return;
+    if (photoRequest) photoRequest.abort();
+    const request = new AbortController();
+    photoRequest = request;
+    const timeout = setTimeout(() => request.abort(), 60_000);
     analyzeButton.disabled = true;
     suggestions.replaceChildren();
+    photoResults.hidden = true;
     photoStatus.textContent = 'Analyzing on the local server…';
     try {
       const response = await fetch('/api/v1/food-photo', {
-        method: 'POST', headers: {'Content-Type': file.type}, body: file,
+        method: 'POST', headers: {'Content-Type': file.type}, body: file, signal: request.signal,
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
-      if (photoInput.files[0] !== file) return;
+      if (photoRequest !== request) return;
+      if (!Array.isArray(result.suggestions) || result.suggestions.length === 0) {
+        throw new Error('No dish suggestions were returned. Try another photo.');
+      }
+      photoResults.hidden = false;
       for (const candidate of result.suggestions) {
         const choice = document.createElement('button');
         choice.type = 'button';
         choice.textContent = candidate.food;
-        choice.addEventListener('click', () => { food.value = candidate.food; });
+        choice.setAttribute('aria-pressed', 'false');
+        choice.addEventListener('click', () => {
+          food.value = candidate.food;
+          for (const button of suggestions.querySelectorAll('button')) {
+            button.setAttribute('aria-pressed', String(button === choice));
+          }
+          photoStatus.textContent = 'Selected ' + candidate.food + '. Enter the portion and energy per 100 g.';
+        });
         suggestions.append(choice);
       }
       photoStatus.textContent = 'Choose a suggestion or type the correct food name.';
     } catch (error) {
-      if (photoInput.files[0] === file) {
-        photoStatus.textContent = 'Analysis unavailable. You can still enter the meal manually. ' + error.message;
+      if (photoRequest === request) {
+        const detail = error.name === 'AbortError'
+          ? 'Analysis took too long. Try again.'
+          : error.message;
+        photoStatus.textContent = 'Analysis unavailable. You can enter the food name manually. ' + detail;
       }
     } finally {
-      if (photoInput.files[0] === file) analyzeButton.disabled = false;
+      clearTimeout(timeout);
+      if (photoRequest === request) {
+        photoRequest = undefined;
+        analyzeButton.disabled = false;
+      }
     }
-  });
+  }
+  analyzeButton.addEventListener('click', analyzePhoto);
+  for (const button of portionButtons) {
+    button.addEventListener('click', () => {
+      grams.value = button.dataset.grams;
+      showEnergy();
+    });
+  }
   grams.addEventListener('input', showEnergy);
+  for (const button of energyButtons) {
+    button.addEventListener('click', () => {
+      density.value = button.dataset.density;
+      showEnergy();
+    });
+  }
   density.addEventListener('input', showEnergy);
   photoForm.addEventListener('submit', async event => {
     event.preventDefault();
